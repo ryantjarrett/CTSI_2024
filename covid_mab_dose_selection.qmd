@@ -1,0 +1,819 @@
+---
+title: "Pharmacometric modeling of COVID-19 monoclonal antibodies: a dose selection tutorial"
+author: "Ryan Jarrett"
+date: "February 27, 2024"
+institute: Eli Lilly & Company
+format:
+  revealjs:
+    incremental: true
+    theme: simple
+    fontsize: 1.4em
+    scrollable: true
+    page-layout: custom
+    code-fold: show
+    code-tools: true
+    footer: "Company Confidential ©2024 Eli Lilly and Company"
+server: shiny
+editor: visual
+bibliography: references.bib
+---
+
+```{r, echo = FALSE}
+rm(list = ls())
+```
+
+```{r}
+#| context: setup
+#| include: false
+# libraries
+library(ggplot2)
+library(rxode2)
+library(dplyr)
+library(shiny)
+library(dplyr)
+```
+
+## Online access to code and slides
+
+Slides can be accessed at
+
+<https://ryan-jarrett-at-lilly.shinyapps.io>
+
+# Introduction
+
+## Overview
+
+::: fragment
+-   Lilly's monoclonal antibodies (mAbs) for treatment or prevention of COVID-19
+-   Candidate selection and design of first in human trials
+-   Extraordinarily fast timeline
+-   **Modeling goal: incorporate all prior data/uncertainty and streamline dose selection**
+:::
+
+# Background
+
+## Next generation monoclonal antibodies
+
+::: columns
+::: {.column width="50%"}
+-   Prior Lilly mAbs: Bamlanivimab, Etesevimab, Bebtelovimab\*
+-   As of late 2022/early 2023, no longer effective due to viral mutations
+-   Treatment landscape has changed: Effective vaccines and treatments available
+-   **Need is most severe if immunocompromised or cannot receive vaccines**
+-   Goal: identify new antibodies for prevention of COVID-19
+:::
+
+::: {.column width="50%"}
+![](images/ChigutsaEtAl2021_Header.png){width="80%"} ![](images/ChigutsaEtAl2022_Header.png){width="80%"}
+:::
+
+<small> $^*$ **Bamlanivimab alone:** November 9, 2020: US Food and Drug Administration (FDA) issues Emergency Use Authorization (EUA) for bamlanivimab for the treatment of mild to moderate coronavirus disease 2019 (COVID-19). April 16, 2021: US FDA revokes bamlanivimab alone EUA.
+
+**Bamlanivimab and etesevimab together:** February 9, 2021: US FDA issues EUA for bamlanivimab and etesevimab together for the treatment of mild to moderate COVID-19. September 16, 2021: US FDA issues EUA for bamlanivimab and etesevimab together for post-exposure prophylaxis of COVID-19 in individuals who are at high risk of progression to severe COVID-19. December 14, 2023: US FDA revokes bamlanivimab and etesevimab together EUA.
+
+**Bebtelovimab:** February 11, 2022: US FDA issues EUA for bebtelovimab for the treatment of mild to moderate COVID-19. November 30, 2022: US FDA announces bebtelovimab is not currently authorized for emergency use in any US region. For more information, read the CDER Statement [here](https://www.fda.gov/drugs/drug-safety-and-availability/fda-announces-bebtelovimab-not-currently-authorized-any-us-region).
+
+</small>
+
+<!-- End columns -->
+:::
+
+## Antibody structure
+
+::: fragment
+::: columns
+::: {.column width="40%"}
+-   Antibodies bind to COVID-19, preventing entry into the cell
+-   Highly specific binding
+-   MAbs are identified in convalescent individuals and isolated
+:::
+
+::: {.column width="60%"}
+![Reproduced from @Donohue2020](images/covid_mab.png){width="60%"}
+:::
+:::
+:::
+
+<!-- ## Antibody structure -->
+
+::: fragment
+::: columns
+::: {.column width="40%"}
+-   Most, but not all, mAbs bind to the "receptor binding domain" (RBD) section of the spike protein
+-   Interest in mAbs that bind to other regions, mAb combos
+:::
+
+::: {.column width="60%"}
+![Reproduction of Figure 2 from @Liu2022](images/mab_image.png){width="60%"}
+:::
+:::
+:::
+
+## Summary of PK/PD modeling goals
+
+::: fragment
+**1) Identify mAbs with high activity against COVID-19**
+
+-   Amino acid substitutions (YTE-modification) extend mAb half-life 2-4x [@Robbie2013]
+:::
+
+::: fragment
+**2) Develop PK/PD model that encompasses prior information**
+
+-   Uncertainty in PK/PD parameters, IIV
+-   Measurement variability
+:::
+
+::: fragment
+**3) Calculate dose required to maintain efficacy for one year**
+
+-   PK efficacy criterion: sustain concentrations $>IC_{90}$ for one year in 90% of patients
+
+-   Many scenarios to consider with fast turn-around times
+
+-   Multiple candidate mAbs
+
+-   Multiple viral strains
+:::
+
+# Modeling approach
+
+## Pharmacokinetics
+
+PK described by a two-compartment model
+
+::: columns
+::: {.column width="40%"}
+::: fragment
+```{r}
+#| echo: true
+#| code-line-numbers: "1-10|11-19"
+#| context: setup
+# Population PK parameters
+cl = 0.05
+v1 = 2.75
+q  = 0.25
+v2 = 2.75
+etacl = 0.25
+etav1 = 0.30
+
+# Estimated plasma IC90 (ug/ml)
+ic90 = 40
+
+# Generate population of virtual patients
+set.seed(1)
+nid = 50
+dat = data.frame(id = 1:nid,
+                 cl = cl*exp(rnorm(nid,0,etacl)),
+                 v1 = v1*exp(rnorm(nid,0,etav1)),
+                 q  = q,
+                 v2 = v2)
+```
+:::
+
+::: fragment
+```{r}
+#| echo: true
+#| fold-code: true
+# view data
+head(dat)
+```
+:::
+:::
+
+::: {.column width="60%"}
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+library(diagram)
+
+nms = c("", "Central", "Peripheral", "")
+Mpk = matrix(nrow = 4, ncol = 4, byrow = TRUE, data = 0)
+Mpk[2,1] = "IV_infusion"
+Mpk[3,2] = "k12"
+Mpk[2,3] = "k21"
+Mpk[4,2] = "k10"
+
+Mc = Mpk
+Mc[Mc %in% c("kR","k10")] = 0
+Mc[Mc %in% c("k12","k21")] = 0.1
+Mc = matrix(as.numeric(Mc),4,4)
+
+plotmat(Mpk, pos = c(1, 1, 2), 
+        name = nms, lwd = 2,
+        box.lwd = c(0,1,1,0),
+        shadow.size = c(0,0,0,0),
+        cex.txt = 1, 
+        box.size = 0.085,
+        box.type = "circle", 
+        box.prop = 0.5,
+        arr.type = "triangle",
+        arr.length	= 0.3,
+        endhead = TRUE,
+        curve = Mc, 
+        relsize =1.2)
+```
+:::
+:::
+
+## Pharmacokinetics
+
+```{r}
+#| context: setup
+#| echo: true
+#| code-line-numbers: "1-7|8-19|20-27|28-46"
+# Compile PK model - 2 compartment, IV administration
+pkmod = rxode2(model = " 
+    conc=centr/v1;
+    d/dt(centr) = -cl/v1*centr - q/v1*centr + q/v2*peri1;
+    d/dt(peri1) =  q/v1*centr - q/v2*peri1;
+  ")
+
+# function to predict from pkmod
+pred_pkpd = function(dose, time, mod = pkmod, params = dat, load_dose = 0, ...){
+ 
+ # Dosing event - repeated dose + optional loading dose
+ ev = et(amt = dose, cmt = 1, id = dat[,"id"], ...) %>%
+    et(amt = load_dose, cmt = 1, id = dat[,"id"]) %>%
+    add.sampling(time)
+  
+ # Return predictions
+ rxSolve(mod, params = params, ev = ev)
+}
+
+# function to summarize predictions -- median + 80% prediction interval
+summarize_pred = function(pred, var="conc", lb = 0.1, mid = 0.5, ub = 0.9){
+ pred %>% 
+  group_by(time) %>%
+  summarise(plb  = quantile(.data[[var]], lb),
+            pmid = quantile(.data[[var]], mid),
+            pub  = quantile(.data[[var]], ub))
+}
+
+# function to plot predictions
+plot_pred = function(pred, target = ic90, var = "conc"){
+ 
+ # summarize results
+ p = summarize_pred(pred, var) %>%
+  ggplot(aes(x = time/30, y = pmid)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = plb, ymax = pub), alpha = 0.2) +
+  xlab("Months following dose") +
+  geom_hline(yintercept = target, linetype = "dotted")
+ 
+ if(var == "conc"){
+  crng = range(pred$conc)
+  p + scale_y_continuous(breaks = 10*2^(0:8), limits = c(10,2580), trans = "log2") +
+   ylab("Serum mAb concentration (μg/mL)")
+ } else{
+  p + ylab("Reduction in relative risk of symptomatic COVID-19")
+ }
+}
+```
+
+## Pharmacokinetics
+
+```{r}
+#| echo: true
+# predict and plot at 1000 mg dose
+plot_pred(pred_pkpd(1000, time = seq(0,180)))
+```
+
+## Optimize PK dose
+
+::: fragment
+PK efficacy criteria: maintain concentrations above IC90
+:::
+
+::: fragment
+What dose is required to maintain IC90 in 90% of patients at 6 months?
+:::
+
+::: fragment
+**Procedure:**
+
+1.  Define objective function that inputs `dose` and outputs the distance between the 10th percentile of responses at 180 days.
+
+::: fragment
+$$\text{OFV}(\text{dose}) = C_{10}\text{(dose) at 180 days} - IC_{90}$$
+:::
+
+2.  When a dose is entered that results in a value of 0, then 90% of patients will be above the target.
+:::
+
+## Optimize PK dose
+
+```{r}
+#| code-line-numbers: "|2|4-5|7-13|15-16"
+#| context: setup
+#| echo: true
+# find dose required to keep 90% of patients above IC90 for the year
+ofv_pdose = function(dose, p = 0.9, target = ic90, var = "conc", ii = 180, coverage_dur = 365, ...){
+  
+  # number of additional doses required
+  addl = floor(coverage_dur/ii)-1
+  
+  # predict 1-pth percentile of distribution at each dose time. Return minimum value.
+  resp = pred_pkpd(dose, time = ii+ii*(0:addl)-1, ii = ii, addl = addl, ...) %>% 
+    group_by(time) %>% 
+    summarise(resp = quantile(.data[[var]], 1-p, na.rm = TRUE)) %>%
+    select(resp) %>%
+    unlist %>%
+    min
+
+  # calculate distance between concentration and target = ic90
+  return(resp - target)
+}
+```
+
+## Pharmacokinetics
+
+::: fragment
+```{r}
+#| echo: true
+# find dose, "d", such that ofv_pdose(d) = 0
+(dose_6mo = uniroot(ofv_pdose, interval = c(0,1e5))$root)
+```
+:::
+
+::: fragment
+```{r}
+#| echo: true
+plot_pred(pred_pkpd(dose_6mo, time = seq(0,180)))
+```
+:::
+
+## Pharmacokinetics scenario 2
+
+-   MAbs may lose efficacy over time due to viral mutations
+
+-   We may wish to increase the dosing frequency
+
+-   Given the long half-life of YTE-modified mAbs, we would expect PK accumulation
+
+::: fragment
+```{r}
+#| echo: true
+plot_pred(pred_pkpd(200, time = seq(0,180), ii = 30, addl = 5))
+```
+:::
+
+## Pharmacokinetics scenario 2
+
+::: fragment
+**Goal:**
+
+-   Find the 3 month dose and loading dose that maintain therapeutic concentrations for 1 year
+:::
+
+::: fragment
+**Procedure:**
+
+-   Define objective function to have both loading and repeated doses
+-   Many combinations are possible that keep $C_p > IC_{90}$
+-   Minimize total amount of medication administered, while also maintaining $C_p > IC_{90}$
+:::
+
+::: fragment
+**Formulate objective function**
+
+$$
+\begin{aligned}
+\text{OFV}(\text{dose},\text{dose0}) &= k\times \text{dose} + \text{dose0} \\
+& + \lambda \times (\text{min}(C_{10}\text{(dose,dose0)}) - IC_{90})^2  
+\end{aligned}
+$$
+:::
+
+## Pharmacokinetics scenario 2: loading dose objective function
+
+::: fragment
+Use logistic transform to keep doses between min, max during minimization
+
+```{r}
+#| context: setup
+#| echo: true
+# logistic transform: (-Inf,Inf) -> (ymin, ymax)
+logi  <- function(x, ymin=0, ymax=10000) ymin + (ymax-ymin) / (1 + exp(-x))
+
+# inverse logistic transform: (ymin, ymax) -> (-Inf,Inf)
+ilogi <- function(y, ymin=0, ymax=10000) -log((ymax-ymin) / (y - ymin) - 1) 
+```
+:::
+
+::: fragment
+Define objective function
+
+```{r}
+#| context: setup
+#| echo: true
+#| code-line-numbers: "1-3|5-6|8-16|18-19"
+ofv_load_dose = function(ilogi_doses, params = dat, target = ic90, 
+                         coverage_dur = 180, ii = 90, p = 0.9, 
+                         var = "conc", lam = 1e4, ...){
+  
+  # transform doses (x2) back to original (bounded) scale
+  doses = logi(ilogi_doses)
+  
+  # use minimum number of time points - predict at troughs
+  addl = floor(coverage_dur/ii)-1
+  resp = pred_pkpd(doses[1], load_dose = doses[2], time = ii+ii*(0:addl)-1, 
+                   params = params, addl = addl, ii = ii, ...) %>%
+    group_by(time) %>% 
+    summarise(resp = quantile(.data[[var]], 1-p, na.rm = TRUE)) %>%
+    select(resp) %>%
+    unlist %>%
+    min
+  
+  # add total dose amount 
+  return(doses[1]*(addl+1) + doses[2] + lam*(resp - target)^2)
+}
+```
+:::
+
+## Pharmacokinetics scenario 2: minimize total dose amount
+
+::: fragment
+```{r}
+#| echo: true
+ilogi_dose_3mo_loading = nlm(f = ofv_load_dose, p = ilogi(c(1000,200)))
+(dose_3mo_loading = logi(ilogi_dose_3mo_loading$estimate))
+```
+:::
+
+::: fragment
+```{r}
+#| echo: true
+# total dose used
+(total_dose = dose_3mo_loading[1]*4 + dose_3mo_loading[2])
+```
+:::
+
+## Pharmacokinetics scenario 2: minimize total dose amount
+
+```{r}
+#| echo: true
+# plot results
+plot_pred(pred_pkpd(dose = dose_3mo_loading[1], load_dose = dose_3mo_loading[2], 
+                  time = seq(0,360), ii = 90, addl = 3))
+```
+
+## Pharmacokinetics scenario 2: response surface
+
+::: fragment
+```{r, response-surface}
+#| echo: true
+#| cache: true
+# create grid of doses
+dose_grid = expand.grid(dose=seq(dose_3mo_loading[1]-30, dose_3mo_loading[1]+30,2), 
+                        load=seq(dose_3mo_loading[2]-30, dose_3mo_loading[2]+30,2))
+# calculate objective function at each
+dose_grid$ofv = apply(dose_grid, 1, function(x) ofv_load_dose(ilogi(unlist(unname(x)))))
+```
+:::
+
+::: fragment
+```{r}
+# plot results
+ggplot(dose_grid, aes(x=dose, y=load, fill = -log(ofv))) +
+    geom_raster() +
+    scale_fill_viridis_c() +
+    scale_x_continuous(expand = c(0,0)) +
+    scale_y_continuous(expand = c(0,0)) +
+  geom_point(aes(x = dose_3mo_loading[1], y = dose_3mo_loading[2]), size = 4) +
+  xlab("Repeated dose (mg)") + 
+  ylab("Loading dose (mg)")
+```
+:::
+
+## COVID-19 mAb PK efficacy criteria
+
+::: fragment
+1.  For each candidate mAb, calculate $>IC_{90}$ against circulating and historic variants
+2.  Calculate dose required to sustain mAb concentrations $>IC_{90}$ for 90% of the population
+:::
+
+::: fragment
+**How can we relate** $IC_{90}$ correlate to patient outcomes?
+:::
+
+# Pharmacodynamic model
+
+## Pharmacodynamic model overview
+
+::: columns
+::: {.column width="50%"}
+::: fragment
+-   IC90 is an *in vitro* measurement of (pseudo-)viral inhibition
+-   Neutralizing antibody (nAb) titers are a measurement of *in vivo* activity of circulating mAbs against live virus
+-   The relationship between nAb and prevention of COVID-19 has been studied in vaccine and mAb trials
+-   **Procedure: convert mAb to nAb, then nAb to efficacy**
+:::
+:::
+
+::: {.column width="50%"}
+::: fragment
+![@Khoury2021](images/Khoury2021_Header.png)
+
+![@Stadler2023](images/Stadler2023_header.png)
+:::
+:::
+:::
+
+## Conversion from mAb to neutralizing titers
+
+**Neutralizing titer:** dilution of a mAb sample required to inhibit viral infection by X% relative to a control sample
+
+![Reproduction of Figure 1a from @Sharma2021](images/Sharma2021_header.png)
+
+-   50% neutralizing titer ($NT_{50}$): dilution required to inhibit 50% infection
+-   Theoretical correspondence between $IC_{50}$ and $NT_{50}$
+
+## Conversion from mAb to neutralizing titers
+
+::: columns
+::: {.column width="50%"}
+::: fragment
+Astrazeneca findings for Evusheld: NT80 corresponds to approximately 50-200% of IC80 value
+:::
+
+::: fragment
+Incorporate mAb to nAb in PD model
+
+```{r}
+#| echo: true
+#| eval: false
+pkpdmod = rxode2(model = " 
+    conc=centr/v1;
+    d/dt(centr) = -cl/v1*centr - q/v1*centr + q/v2*peri1;
+    d/dt(peri1) =  q/v1*centr - q/v2*peri1;
+    
+    # fold change in concentration from IC50 = nAb
+    nAb = conc/ic50
+")
+```
+:::
+
+::: fragment
+```{r}
+#| echo: true
+#| context: setup
+set.seed(1)
+dat$ic50 = 0.05*exp(rnorm(nid,0,0.35)) # log(2)/1.96 = 0.35
+```
+:::
+:::
+
+::: {.column width="50%"}
+![Reproduction of Figure 11 from @EMA2022 assessment of Evusheld](./images/AZ-Fig11.png)
+:::
+:::
+
+## Conversion from nAb to efficacy
+
+::: fragment
+![Reproduction of Figure 4b from @Stadler2023. The red and blue lines show the association between nAb and efficacy among vaccine and mAb trials, respectively.](./images/Stadler2023_nAb.png){width="50%"}
+:::
+
+::: fragment
+**Dose-response equation**
+
+$$E(\text{nAb}|K,\text{nAb}_{50}) = \frac{m}{1 + (2m-1) \times \text{exp}(-K \times (\text{log}_{10}(\text{nAb}) - \text{log}_{10}(\text{nAb}_{50})))}$$
+:::
+
+## Incorporation of efficacy in PD model
+
+::: fragment
+```{r}
+#| echo: true
+#| context: setup
+#| code-line-numbers: "|1-14|12-13|16-21"
+pkpdmod = rxode2(model = " 
+    conc=centr/v1;
+    d/dt(centr) = -cl/v1*centr - q/v1*centr + q/v2*peri1;
+    d/dt(peri1) =  q/v1*centr - q/v2*peri1;
+    
+    # fold change in concentration from IC50 = nAb
+    nAb = conc/ic50
+ 
+    # extra scaling factor used by Stadler et al. (2023)
+    nAb_fold = nAb/347.6
+       
+    # predict efficacy response (reduction in risk of symptomatic covid)
+    eff = m / (1 + (2*m-1) * exp(-k*(log10(nAb_fold) - log10(nAb50)))) * 100
+")
+
+# add PD parameters
+set.seed(1)
+dat = dat %>%
+ mutate(m    = 0.9229*exp(rnorm(nid,0,0.03)),
+        k    = 2.8,
+        nAb50 = 0.49*exp(rnorm(nid,0,0.8)))
+```
+:::
+
+## Visualize PD response
+
+```{r}
+#| echo: true
+#| code-fold: true
+
+# Function to calculate PD response given plasma concentrations
+pred_pd = function(cp, pars){
+ ic50 = pars[,"ic50"]   # in-vitro IC50 estimate (ug/mL)
+
+ # fold change in concentration from IC50 = nAb
+ nAb = cp/ic50
+
+ # extra scaling factor used by Stadler et al. (2023)
+ nAb_scale=347.6
+ nAb_fold = nAb/nAb_scale
+
+ # nAb to effect
+ m = pars[,"m"]         # maximum effect
+ k = pars[,"k"]         # slope at c50
+ nAb50 = pars[,"nAb50"] # nAb concentration for 50% effect
+
+ # calculate efficacy (reduction in relative risk)
+ m / (1 + (2*m-1) * exp(-k*(log(nAb_fold,base=10) - log(nAb50,base=10)))) * 100
+}
+
+# visualize prediction and uncertainty
+cp_range = 1:500
+
+sapply(1:nid, function(i) pred_pd(cp = cp_range, dat[i,,drop=FALSE])) %>%
+ apply(1, function(x) quantile(x, c(0.05,0.5,0.95))) %>% t %>%
+ as.data.frame %>%
+ mutate(cp = cp_range) %>%
+ reshape2::melt(id.vars = "cp") %>%
+ ggplot(aes(x = cp, y = value, linetype = variable)) +
+  geom_line() +
+  scale_linetype_manual(values = c("dotted","solid","dotted")) +
+ xlab("Plasma concentration (ug/mL)") +
+ ylab("Reduction in relative risk of symptomatic COVID-19") +
+ scale_x_log10()
+```
+
+## Calculate dose-response curve
+
+::: fragment
+```{r}
+#| echo: true
+targets = seq(60,85,2)
+tdoses = sapply(targets, function(x){
+ uniroot(ofv_pdose, interval = c(0,1e5), target = x, mod = pkpdmod, var = "eff")$root
+})
+```
+:::
+
+::: fragment
+```{r}
+# plot dose response curve
+data.frame(targets, tdoses) %>%
+ ggplot(aes(x = tdoses, y = targets)) +
+ geom_line() + 
+ xlab("Dose of mAb (mg)") + 
+ ylab("Reduction in relative risk of symptomatic COVID-19 (%)") +
+ ggtitle("Dose required to achieve risk reduction in 90% of recipients")
+```
+:::
+
+# COVID-19 mAb dose selection application
+
+```{r}
+#| panel: sidebar
+h2("Efficacy criterion")
+
+selectInput("criterion", "Select a criterion", choices = c("PK" = "PK", "PD" = "PD"))
+
+br()
+
+h2("PK criteria inputs")
+
+numericInput("ic90", "In vitro IC90 estimate (ug/ml)", min = 0, max = 1000, value = 40, width = "80%")
+
+br()
+
+h2("PD criteria inputs")
+
+numericInput("ic50", "In vitro IC50 estimate (ug/ml)", min = 0, max = 1000, value = 0.05, width = "80%", step = 0.01)
+numericInput("target", "Target efficacy", min = 0, max = 100, value = 70, width = "80%", step = 1)
+
+br()
+
+h2("Dosing conditions")
+
+checkboxInput("load_dose_ppx",label="Loading dose",value=FALSE)
+numericInput("dur", "Coverage duration (days)", value = 365, min = 30, max = 365, step = 30)
+numericInput("ii", "Dosing frequency (days)", value = 180, min = 30, max = 180, step = 30)
+numericInput("dose_increment", "Dose increment (mg)", value = 10, min = 10, max = 500, step = 10)
+
+br()
+
+h2("Optimization parameters")
+
+numericInput("init_dose", "Initial starting dose (mg)", value = 500, min = 10, max = 10000, step = 100)
+numericInput("init_load_dose", "Initial loading dose (mg)", value = 200, min = 0, max = 10000, step = 100)
+
+br()
+
+h2("Calculate dose")
+
+br()
+
+actionButton("button", "Submit")
+```
+
+```{r}
+#| panel: fill
+textOutput("dose_text")
+textOutput("load_dose_text")
+plotOutput("proj_resp")
+```
+
+```{r}
+#| context: server
+observeEvent(input$button, {
+ 
+ # update IC50, if changed by the user
+ set.seed(1)
+ dat$ic50 = input$ic50*exp(rnorm(nid,0,0.35))
+  
+ # if PD criterion, set target to efficacy and use (possibly updated) IC50
+ if(input$criterion == "PD"){
+  # use PD criterion: keep 90% above target risk reduction
+  tgt = input$target
+  varnm = "eff"
+ } 
+ else{
+  # use PK criterion: keep 90% above IC90
+  tgt = input$ic90
+  varnm = "conc"
+ }
+ 
+ # objective function - if loading dose, minimize with `nlm`. Otherwise find
+ # intersection with target using `uniroot`
+  if(input$load_dose_ppx){
+   # use nlm to minimize loading dose objective function: minimize total amount
+   # administered, while requiring that 90% are above the target
+   ilogi_dose = nlm(ofv_load_dose, p = ilogi(c(input$init_dose,input$init_load_dose)), 
+                    params = dat, mod = pkpdmod, var = varnm, target = tgt, 
+                    ii = input$ii, coverage_dur = input$dur)
+   # transform doses back to original scale
+   dose = logi(ilogi_dose$estimate)[1]
+   load_dose = logi(ilogi_dose$estimate)[2]
+  } else{
+   # find intersection of 10th percentile and target concentration/effect
+   dose = uniroot(ofv_pdose, interval = c(0,1e5), target = tgt,
+                  params = dat, mod = pkpdmod, var = varnm, ii = input$ii,
+                  coverage_dur = input$dur)$root
+   # set loading dose = 0
+   load_dose = 0
+  }
+ 
+ # round doses
+ dose_round = ceiling(dose/input$dose_increment)*input$dose_increment
+ load_dose_round = ceiling(load_dose/input$dose_increment)*input$dose_increment
+  
+ # return outputs - text reporting doses, plot of response
+ output$dose_text = renderText({paste("Optimal repeated dose:",dose_round,"mg")})
+ output$load_dose_text = renderText({paste("Optimal loading dose:",load_dose_round,"mg")})
+ output$proj_resp = renderPlot(
+  
+  plot_pred(
+   pred_pkpd(dose_round, load_dose = load_dose_round, time = seq(0,input$dur), 
+           params = dat, mod = pkpdmod, ii = input$ii, addl = floor(input$dur/input$ii)-1), 
+   target = tgt, var = varnm
+   )
+  )
+})
+```
+
+# Discussion
+
+::: fragment
+Rapid COVID-19 mutation rate placed specific demands upon PK/PD modeling:
+
+1.  Extraordinarily fast development time
+
+2.  Limited prior data
+
+3.  Need to evaluate multiple candidates/scenarios
+:::
+
+::: fragment
+**Role of PK/PD**
+
+1.  Incorporated prior data to describe believed relationships
+
+2.  Streamlined dose-selection process for rapid turnaround
+
+-   Define efficacy criteria in terms of population variability
+-   Optimize efficacy criteria
+
+3.  Create an interface to easily evaluate alternative scenarios
+:::
+
+# Questions?
+
+# References
