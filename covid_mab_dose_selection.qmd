@@ -30,14 +30,16 @@ library(ggplot2)
 library(rxode2)
 library(dplyr)
 library(shiny)
-library(dplyr)
 ```
 
 ## Online access to code and slides
 
 Slides can be accessed at
 
-<https://ryan-jarrett-at-lilly.shinyapps.io>
+<https://github.com/ryantjarrett/CTSI_2024>
+
+**Note**: All example code uses publicly available values from cited references and is written for this presentation. The examples do not refer to any antibody that is, or has been developed by Eli Lilly and Co.
+
 
 # Introduction
 
@@ -290,12 +292,16 @@ What dose is required to maintain IC90 in 90% of patients at 6 months?
 :::
 
 ::: fragment
+Define criteria as a function and optimize directly
+:::
+
+::: fragment
 **Procedure:**
 
 1.  Define objective function that inputs `dose` and outputs the distance between the 10th percentile of responses at 180 days.
 
 ::: fragment
-$$\text{OFV}(\text{dose}) = C_{10}\text{(dose) at 180 days} - IC_{90}$$
+$$\text{OFV}(\text{dose}) = [C_{10}\text{(dose) at 180 days}] - IC_{90}$$
 :::
 
 2.  When a dose is entered that results in a value of 0, then 90% of patients will be above the target.
@@ -463,7 +469,6 @@ plot_pred(pred_pkpd(dose = dose_3mo_loading[1], load_dose = dose_3mo_loading[2],
 ::: fragment
 ```{r, response-surface}
 #| echo: true
-#| cache: true
 # create grid of doses
 dose_grid = expand.grid(dose=seq(dose_3mo_loading[1]-30, dose_3mo_loading[1]+30,2), 
                         load=seq(dose_3mo_loading[2]-30, dose_3mo_loading[2]+30,2))
